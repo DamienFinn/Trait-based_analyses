@@ -1,0 +1,242 @@
+#Code for functional trait-based analyses
+
+#Author: Damien Finn, damien.finn@uqconnect.edu.au
+
+#Brief description: These analyses take amino acid sequences of microbial genomes, compare each 
+#sequence with every other sequence to generate pairwise similarity measures (%). Then, a
+#process called Markov Chain Clustering is used to identify highly similar clusters. These 
+#clusters are considered 'traits'. Next, each trait is annotated via KEGG to inform its
+#biological function. Finally, matrices of genome x trait or BRITE are generated for ecological
+#analyses in R.
+
+#Twelve microbial genomes are provided alongside this guide as an example for analyses.
+
+
+#------------------------Step one: all versus all BLAST-P----------------------------------
+
+#Place all genome files in a single directory. These files should be the amino acid sequences of
+#each open reading frame of the genome. Entries will look like this:
+
+#>WP_043238839.1 protein-glutamate O-methyltransferase CheR [Pseudomonas azotifigens]
+#MSANLEFEQFRAFLEKTCGILLGTNKQYLVSSRLNKLMAQNGIKSLGELINRIQAQPRAGLREQVVDAMT
+#TNETLWFRDTYPFEVLKQRVLPEMIKASPGQRLRIWSAACSSGQEPFSLSMTIDEFERSNPGQLKAGAQI
+#VATDLSGAMLTACKAAEYDSLAIGRGLSQERLQRYFDPRPGGRWAVKAAIRSRVEFRALNLLDSYAALGK
+#FDIVFCRNVLIYFSADVKKDILRRIHATLKPGGYLFLGASEALNGLPELYQMVQCSPGIVYRAR
+
+#Concatenate the genomes into a single file with Terminal.
+
+$cat * > catgenomes.faa
+
+#Open this file and replace all instances of ',', '(' and ')' with '.'. This will prevent 
+#frustration and heartbreak downstream.
+
+#Now make a BLAST-P database
+#Note that ncbi may be in a different directory on your system.
+
+$/usr/local/ncbi/blast/bin/makeblastdb -in catgenomes.faa -dbtype prot -out genomes_db
+
+
+#The output should look like this:
+#Building a new DB, current time: 09/09/2020 13:56:13
+#New DB name:   /Volumes/Untitled1/Trait.mod.scripts.for.upload/Genomes/genomes_db
+#New DB title:  catgenomes.faa
+#Sequence type: Protein
+#Keep Linkouts: T
+#Keep MBits: T
+#Maximum file size: 1000000000B
+#Adding sequences from FASTA; added 66435 sequences in 1.9776 seconds
+
+
+#Next, perform the all vs all BLAST-P against your personal database, 'genomes_db'
+#Note: this can be a slow, computationally intensive process with many genomes. If so, then
+#split your concatenated file into smaller files and run them against 'genomes_db'. The 
+#'genomes_db' database has ALL amino acid sequences, so you won't miss any pairwise comparisons.
+
+/usr/local/ncbi/blast/bin/psiblast -db genomes_db -query catgenomes.faa -outfmt 6 -num_threads 12 -out catgenomes_ava.tsv
+
+#The ava.tsv is a tab separated file where the first column is the first amino acid sequence, the second column
+#is the amino acid sequence being compared to, and the third column is the percent similarity
+
+
+#Run the FilterPSIBlast.py script to extract only the first three columns of the ava.tsv file, and to remove 
+#similarity values < 50%. These similarity values are essentially distances when the network based, Markov Chain Clustering
+#(MCL) comes into play, and by removing edges (connections) between nodes (proteins) that are poor, we improve the stringency 
+#of the clustering. Keeping only the first three columns formats the file for ready input into MCL.
+
+
+$python FilterPSIBlast.py -i catgenomes_ava.tsv -o ./
+
+#In addition to producing a file formatted for MCL, this script provides a printed output to
+#inform you on how many edges (the similarity scores) have been retained.
+
+#Original count of PSI-Blast sim scores:
+#5090391
+#Filtered count of only > 50% similarity:
+#306090
+
+
+#------------------------------Step two: Markov Chain Clustering----------------------------
+
+#Next is to perform the MCL. Essentially, this is a network based approach that iteratively identifies
+#the best network clusters, based on distances between nodes. As mentioned above, here nodes are 
+#proteins and edges are the amino acid sequence similarity - more similar proteins will be closer to
+#each other than dissimilar proteins. Each individual cluster will be considered our 'traits' for further
+#analyses.
+
+#The program for MCL can be downloaded here: https://micans.org/mcl/
+#Further information regarding how to run and optimise the parameters, and the theory behind the mathematics
+#is helpfully detailed here.
+
+
+#First convert the filtered.txt (essentially an edge list of nodes and distances) into an MCL object. 
+
+$mcxload -abc catgenomes_ava.tsvPSIBlastfiltered.txt --stream-mirror -write-tab MCLoutput.tab -o MCLoutput.mci
+
+#The output should look like:
+
+#CLoutput.tab -o MCLoutput.mci
+#...............[mclIO] writing <MCLoutput.mci>
+#.......................................
+#[mclIO] wrote native interchange 66414x66414 matrix with 327724 entries to stream <MCLoutput.mci>
+#[mclIO] wrote 66414 tab entries to stream <MCLoutput.tab>
+#[mcxload] tab has 66414 entries
+
+
+#Next, the network iterations to identify clusters is performed. Decreasing the -I parameter can improve
+#stringency if the synopsis is poor. 
+
+$mcl MCLoutput.mci -I 12
+
+#The output should look like:
+
+#[mcl] cut <3> instances of overlap
+#[mcl] jury pruning marks: <99,99,99>, out of 100
+#[mcl] jury pruning synopsis: <99.0 or perfect> (cf -scheme, -do log)
+#[mclIO] writing <out.MCLoutput.mci.I120>
+#.......................................
+#[mclIO] wrote native interchange 66414x32227 matrix with 66414 entries to stream <out.MCLoutput.mci.I120>
+#[mcl] 32227 clusters found
+#[mcl] output is in out.MCLoutput.mci.I120
+
+#We have formed 32 227 'traits' with a confidence of 99%. 
+
+#Finally, we produce an output object that we can work with readily.
+
+$mcxdump -icl out.MCLoutput.mci.I120 -tabr MCLoutput.tab -o MCLclustersoutput
+
+#In this object, every row is a trait and every protein ID is a member of that trait. Now, run the
+#MCLtoReshape2.py script to format the MCL output into something we can work with in R. This requires
+#two files: -m is the MCL ouput, and -g is the catgenomes.faa file which tells us what protein IDs go 
+#with what genomes.
+
+#Note that only 18 628 traits include at least two proteins / are shared between at least genomes. Remove
+#these 'orphan' trait clusters before building the Reshape2 friendly file.
+
+$python MCLtoReshape2.py -m MCLclustersoutput_noorphans.txt -g catgenomes.faa -o ./ 
+
+#In the MCLtoReshape2input.txt file, the first column is the genome, second column is the protein ID and
+#the third column is the functional cluster (i.e. trait) that each protein belongs to.
+
+
+#Import this file into R:
+
+>df <- read.table('/path/to/my/MCLtoReshape2input.txt', sep = '\t', header = T)
+
+#With the Reshape2 package, transform this into a genome x trait matrix:
+
+>trait.mat <- dcast(df, Genome ~ FC)
+
+#Note that due to the poor naming conventions within uploaded genomes, there can be erroneous, mostly empty 'genome' rows
+#that can't be associated with a specific genome. In this example, the Candidatus Nitrosoarchaeum koreensis MY1 genome
+#has been split into three different rows because the genome annotation was inconsistent in giving a genome name to its
+#proteins. These different names are: "Candidatus Nitrosoarchaeum", "Candidatus Nitrosoarchaeum koreensis", and
+#"Candidatus Nitrosoarchaeum koreensis MY1". Manually clean up these erroneous, split rows as follows:
+
+>Can.Nirtosoarchaeum.kor.MY1 <- colSums(trait.mat[10:12,-1], dims = 1) 
+
+#This creates a single row for Can. N. koreensis MY1 with the correct sums of each trait. Do this for the genomes that
+#can be sensibly collated. Rbind the original matrix with these collated rows and write out the table. Finally, remove
+#the insensible rows that cannot be collated, e.g. "Proteobacteria". 
+
+#This clean matrix can be used for multiple analyses, including the UPGMA shown in the paper associated with
+#this code, but also various other exploratory statistical analyses like ordination and covariance networks. A clean
+#version of this matrix is supplied on Github for you to compare with, as 'GenomexTrait.txt'. 
+
+#With the clean matrix, also create a long format with Reshape2:
+
+>longformat <- melt(trait.mat)
+
+
+#-----------------------------Step three: KEGG annotation of traits------------------------
+
+
+#To begin annotating the traits, match the traits from the MCL output with the amino acid sequences from the catgenomes file
+#with the IdentifyTraits.py script.
+
+$python IdentifyTraits.py -m MCLclustersoutput_noorphans.txt -g catgenomes.faa -o ./
+
+#This script produces files in a format acceptable for KEGG's BLAST-KOALA GUI portal (https://www.kegg.jp/blastkoala/).
+#Many files are produced because there is a limit on how many queries can be uploaded to KEGG at a time.
+#If your institution has access to the KEGG FTP there is probably a quicker / more convenient way to annotate these sequences,
+#but if you don't, it's necessary to upload each individual file to KEGG for annotation. 
+
+#Some manual cleaning of a few entries may be necessary if words are erroneously formatted before some amino acids - this will
+#depend on the removal of ',', '(', ')' and other symbols in the genome annotation file that interact with Python. One can only
+#hope that, in future, annotated genomes will follow some form of standardised, computer-language friendly system. 
+
+#The output from KEGG should look like the following:
+
+#FC.1	K03406
+#FC.2	K04077
+#FC.3
+#FC.4
+#FC.5
+#FC.6	K00789
+#FC.7	K03086
+#FC.8	K11688
+#FC.9	K18320
+#FC.10	K09933
+#...
+
+#To automate pulling BRITE category data for each KO, run the GetBRITEinfo.py script. Note that this script requires
+#both the 'BeautifulSoup' and 'urllib' Python packages for interacting with the KEGG url and parsing through its database
+#to match KO terms.
+
+$python GetBRITEinfo.py -i user_ko.txt -o ./
+
+#The output should look like this:
+
+#FC.1	K03406	09130 Environmental Information Processing	09132 Signal transduction	02020 Two-component system
+#FC.2	K04077	09120 Genetic Information Processing	09123 Folding, sorting and degradation	03018 RNA degradation
+#FC.6	K00789	09100 Metabolism	09105 Amino acid metabolism	00270 Cysteine and methionine metabolism
+#FC.7	K03086	09180 Brite Hierarchies	09182 Protein families: genetic information processing	03021 Transcription machinery
+
+#Note the columns are: 1) functional trait; 2) KO term; 3) BRITE lvl 1; 4) BRITE lvl 2; 5) BRITE lvl 3.
+#Replace all ',' with '.'.
+
+#With the long-formatted trait matrix and the BRITE annotated KO list, it is finally possible to append the relevant BRITE
+#categories to the traits and genomes of your dataset.
+
+$python MatchFCs.py -g GenomexTrait_longformat.txt -a user_ko.txt_BRITEinfo.txt -o ./
+
+#The output looks like this:
+
+#HighRank	LowRank	Genome	variable	value	Brite2	Brite3
+#Acidobacteria	"Acidobacteriaceae"	"Acidobacteria bacterium Mor1"	"FC.1"	1	09132 Signal transduction	02020 Two-component system
+#Acidobacteria	"Acidobacteriaceae"	"Bryocella elongata"	"FC.1"	9	09132 Signal transduction	02020 Two-component system
+#Betaproteobacteria	"Burkholderiaceae"	"Chitinimonas koreensis"	"FC.1"	19	09132 Signal transduction	02020 Two-component system
+#Actinobacteria	"Frankiaceae"	"Frankia casuarinae"	"FC.1"	0	09132 Signal transduction	02020 Two-component system
+#Firmicutes	"Lactobacillaceae"	"Lactobacillus herbarum"	"FC.1"	0	09132 Signal transduction	02020 Two-component system
+
+
+#Import this file into R, and as before, use Reshape2 to create a genome x BRITE 3 (or whichever you prefer) matrix.
+
+>df <- read.table('/path/to/my/GenomexTrait_longformat.txtmatchedFCs.txt', sep = "\t", header = T)
+
+>BRITE.mat <- dcast(df, Genome ~ Brite3, value.var = "value", fun.aggregate = sum) 
+
+#A version of this matrix is provided on Github for your comparisons as 'GenomexBRITE3.txt'. This matrix can be
+#used for statistical analyses to find trends between genomes, Phyla, Families and the various BRITE categories such as
+#Random Forest used in the paper associated with this guide.
+
+
